@@ -24,20 +24,21 @@ export default function BlindWatermarkPage() {
       watermarkInstance.destroy()
     }
 
-    const watermark = new BlindWatermark({
-      content: watermarkText,
-      width: 200,
-      height: 200,
-      onSuccess: () => {
-        message.success('水印添加成功')
-      },
-      onFail: (err) => {
-        message.error('水印添加失败: ' + err)
-      }
-    })
+    try {
+      const watermark = new BlindWatermark({
+        content: watermarkText,
+        width: 200,
+        height: 200,
+        onSuccess: () => {
+          message.success('水印添加成功')
+        }
+      })
 
-    watermark.create()
-    setWatermarkInstance(watermark)
+      watermark.create()
+      setWatermarkInstance(watermark)
+    } catch (err) {
+      message.error('水印添加失败: ' + (err instanceof Error ? err.message : String(err)))
+    }
   }
 
   // 删除水印
@@ -69,18 +70,19 @@ export default function BlindWatermarkPage() {
     reader.onload = (e) => {
       const imageUrl = e.target?.result as string
 
-      BlindWatermark.decode({
-        compositeOperation: 'overlay',
-        compositeTimes: 4,
-        url: imageUrl,
-        onSuccess: (imageBase64) => {
-          setDecodedImage(imageBase64)
-          message.success('水印解密成功')
-        },
-        onFail: (err) => {
-          message.error('水印解密失败: ' + err)
-        }
-      })
+      try {
+        BlindWatermark.decode({
+          compositeOperation: 'overlay',
+          compositeTimes: 4,
+          url: imageUrl,
+          onSuccess: (imageBase64) => {
+            setDecodedImage(imageBase64)
+            message.success('水印解密成功')
+          }
+        })
+      } catch (err) {
+        message.error('水印解密失败: ' + (err instanceof Error ? err.message : String(err)))
+      }
     }
     reader.readAsDataURL(file)
   }
