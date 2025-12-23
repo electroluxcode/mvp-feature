@@ -46,7 +46,6 @@ export default function StudioLayout({ children }: StudioLayoutProps) {
 
     // 所有可能的路径映射
     const routeMap: Record<string, { selected: string; parent: string }> = {
-      '/excel/base': { selected: '/excel/base', parent: '/excel' },
       '/watermark/blind': { selected: '/watermark/blind', parent: '/watermark' },
     }
 
