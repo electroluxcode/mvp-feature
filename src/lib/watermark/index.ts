@@ -1,5 +1,4 @@
 'use client'
-
 /**
  * A single extracted watermark view for display.
  * The image URL can be used directly as an image source.
@@ -498,16 +497,18 @@ export class WatermarkService {
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         if (mutation.type === 'childList') {
-          for (const node of mutation.removedNodes) {
+          const isWatermarkRemoved = Array.from(mutation.removedNodes).some((node) => {
             if (
               node.nodeType === 1 &&
               (node as Element).getAttribute('data-wm-id') === this.wmId
             ) {
               this.options?.onTamper?.({ kind: 'removed' })
               setTimeout(() => this.mountWatermark(), 0)
-              return
+              return true
             }
-          }
+            return false
+          })
+          if (isWatermarkRemoved) return
         }
         if (mutation.type === 'attributes') {
           const target = mutation.target as Node
