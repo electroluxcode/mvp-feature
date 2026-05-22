@@ -10,6 +10,7 @@ import {
   MenuOutlined,
   CloseOutlined,
   EyeOutlined,
+  ScanOutlined,
 } from '@ant-design/icons'
 import './styles.css'
 
@@ -25,6 +26,23 @@ const menuItems: MenuProps['items'] = [
         key: '/watermark/blind',
         icon: <FolderOutlined />,
         label: 'Blind Watermark',
+      },
+      {
+        key: '/watermark/string-blind',
+        icon: <FolderOutlined />,
+        label: 'String Blind Watermark',
+      },
+    ],
+  },
+  {
+    key: '/ocr',
+    icon: <ScanOutlined />,
+    label: 'OCR',
+    children: [
+      {
+        key: '/ocr/tesseract',
+        icon: <FolderOutlined />,
+        label: 'Tesseract.js',
       },
     ],
   },
@@ -47,6 +65,8 @@ export default function StudioLayout({ children }: StudioLayoutProps) {
     // 所有可能的路径映射
     const routeMap: Record<string, { selected: string; parent: string }> = {
       '/watermark/blind': { selected: '/watermark/blind', parent: '/watermark' },
+      '/watermark/string-blind': { selected: '/watermark/string-blind', parent: '/watermark' },
+      '/ocr/tesseract': { selected: '/ocr/tesseract', parent: '/ocr' },
     }
 
     // 精确匹配路径

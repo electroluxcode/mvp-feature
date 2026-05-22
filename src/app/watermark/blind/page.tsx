@@ -1,51 +1,89 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Card, Button, Input, Space, Upload, message, Image, Divider } from 'antd'
 import { UploadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons'
 import { BlindWatermark } from 'watermark-js-plus'
 import type { UploadFile } from 'antd'
 
+const getWatermarkFontColor = (isDarkMode: boolean) => isDarkMode ? '#fff' : '#000'
+
 export default function BlindWatermarkPage() {
   const [watermarkText, setWatermarkText] = useState('hello my watermark')
-  const [watermarkInstance, setWatermarkInstance] = useState<BlindWatermark | null>(null)
+  const [hasWatermark, setHasWatermark] = useState(false)
+  const [isDarkMode, setIsDarkMode] = useState(false)
   const [decodedImage, setDecodedImage] = useState<string | null>(null)
   const [uploadedFile, setUploadedFile] = useState<UploadFile | null>(null)
+  const watermarkRef = useRef<BlindWatermark | null>(null)
+  const previousDarkModeRef = useRef(isDarkMode)
 
-  // 添加隐藏水印
-  const handleAddWatermark = () => {
+  useEffect(() => {
+    const darkModeMedia = window.matchMedia('(prefers-color-scheme: dark)')
+    const syncDarkMode = () => {
+      setIsDarkMode(darkModeMedia.matches)
+    }
+
+    syncDarkMode()
+    darkModeMedia.addEventListener('change', syncDarkMode)
+
+    return () => {
+      darkModeMedia.removeEventListener('change', syncDarkMode)
+      watermarkRef.current?.destroy()
+    }
+  }, [])
+
+  const createWatermark = useCallback((showSuccessMessage = true) => {
     if (!watermarkText.trim()) {
       message.warning('请输入水印内容')
       return
     }
 
-    // 如果已有水印实例，先销毁
-    if (watermarkInstance) {
-      watermarkInstance.destroy()
-    }
+    watermarkRef.current?.destroy()
 
     try {
       const watermark = new BlindWatermark({
         content: watermarkText,
+        fontColor: getWatermarkFontColor(isDarkMode),
         width: 200,
         height: 200,
         onSuccess: () => {
-          message.success('水印添加成功')
+          if (showSuccessMessage) {
+            message.success('水印添加成功')
+          }
         }
       })
 
       watermark.create()
-      setWatermarkInstance(watermark)
+      watermarkRef.current = watermark
+      setHasWatermark(true)
     } catch (err) {
       message.error('水印添加失败: ' + (err instanceof Error ? err.message : String(err)))
     }
+  }, [isDarkMode, watermarkText])
+
+  useEffect(() => {
+    if (previousDarkModeRef.current === isDarkMode) {
+      return
+    }
+
+    previousDarkModeRef.current = isDarkMode
+
+    if (hasWatermark) {
+      createWatermark(false)
+    }
+  }, [createWatermark, hasWatermark, isDarkMode])
+
+  // 添加隐藏水印
+  const handleAddWatermark = () => {
+    createWatermark()
   }
 
   // 删除水印
   const handleRemoveWatermark = () => {
-    if (watermarkInstance) {
-      watermarkInstance.destroy()
-      setWatermarkInstance(null)
+    if (watermarkRef.current) {
+      watermarkRef.current.destroy()
+      watermarkRef.current = null
+      setHasWatermark(false)
       message.success('水印已删除')
     } else {
       message.warning('当前没有活动的水印')
@@ -128,13 +166,14 @@ export default function BlindWatermarkPage() {
                 danger
                 icon={<DeleteOutlined />}
                 onClick={handleRemoveWatermark}
-                disabled={!watermarkInstance}
+                disabled={!hasWatermark}
               >
                 删除水印
               </Button>
             </Space>
             <div style={{ marginTop: '16px', color: '#666', fontSize: '14px' }}>
               <p>提示：添加水印后，水印会隐藏在当前页面中，肉眼几乎不可见。</p>
+              <p>当前水印颜色会跟随系统{isDarkMode ? '暗色' : '亮色'}模式自动切换。</p>
             </div>
           </div>
 
