@@ -20,7 +20,11 @@ export type WatermarkContrastResult = {
 
 export type LocalDifferenceWatermarkResult = WatermarkContrastView | null
 
-export type WatermarkContrastMode = 'local-difference' | 'dark-ink' | 'bright-ink'
+export type WatermarkContrastMode =
+  | 'reverse-layer'
+  | 'local-difference'
+  | 'dark-ink'
+  | 'bright-ink'
 
 export type WatermarkImageSource = File | Blob | string
 
@@ -55,20 +59,110 @@ export const WATERMARK_DOM_ID = 'magic-watermark'
 /** Default watermark tile config. Very low opacity may not render on some iPhones. */
 export const WATERMARK_CONFIG = {
   fontSize: 18,
-  color: 'rgba(255, 0, 0, 0.016)',
+  /** 文字颜色 */
+  textColor: 'rgba(0, 0, 0, 0.015)',
+  /** 文字底衬背景色 */
+  backgroundColor: 'rgba(255, 255, 255, 0.015)',
   rotate: -12,
-  gapX: 10,
-  gapY: 60,
+  gapX: 60,
+  gapY: 140,
+  patchPaddingX: 3,
+  patchPaddingY: 3,
+  patchRadius: 4,
+  /** 文字底衬，默认开启；仅当显式传入 `useBackground: false` 时关闭。 */
+  useBackground: true,
+  /** @deprecated 请使用 textColor */
+  color: 'rgba(0, 0, 0, 0.02)',
 }
 
-/** Default gain values for dark-ink, bright-ink, and local-difference enhancement. */
-export const WATERMARK_CONTRAST_RANGE= {
-  big: 100,
-  middle: 80,
+/** 窄屏（≤ {@link WATERMARK_MOBILE_MAX_WIDTH}）挂载时合并的间距/字号，挂载时判定一次，不监听 resize。 */
+export const WATERMARK_MOBILE_CONFIG = {
+  gapX: 30,
+  gapY: 60,
+  fontSize: 14,
+} as const
+
+/** Viewport width at or below this value uses {@link WATERMARK_MOBILE_CONFIG}. */
+export const WATERMARK_MOBILE_MAX_WIDTH = 768
+
+/** Gain for dark-ink / bright-ink / local-difference modes. */
+export const WATERMARK_CONTRAST_RANGE = {
+  big: 80,
+  middle: 50,
   small: 60,
 }
 
-export type WatermarkDataUrlOptions = Partial<typeof WATERMARK_CONFIG>
+/** Tunables for config-channel extract (`reverse-layer`). */
+export const WATERMARK_EXTRACT_CONFIG = {
+  /**
+   * 背景半径 bgRadius（px）
+   * 用矩形邻域均值估计每个像素的「局部背景」，再与当前像素做通道差分。
+   * 越小越保留细笔画/淡纹，但页面纹理也会被增强；越大差分更平滑，淡字易被抹进背景。
+   * 建议：16～28。
+   */
+  bgRadius: 22,
+  /**
+   * 通道增益 gain
+   * 将 RGB 方向差分（黑字变暗、红底偏 R 等）乘以该系数后再合成。
+   * 宜偏小（1～6）：后续还有分位归一化；过大易 clamp 到 255，淡纹反而发糊、发白。
+   */
+  gain: 2,
+  greenInkGain: 10,
+  /**
+   * 噪声底分位 noisePercentile（0～1）
+   * 出图前取全图残差的该分位数作为噪声底，低于它的信号会被压暗。
+   * 越低越能显出淡纹，背景噪点也会变多；越高只留强对比区域。
+   * 建议：0.35～0.55。
+   */
+  noisePercentile: 0.42,
+  noiseCeilingPercentile: 0.985,
+  noiseStretch: 3.2,
+  /**
+   * 弱信号提升 signalGamma
+   * 残差归一化后的幂次曲线：小于 1 时抬高弱信号、压缩强纹理峰值。
+   * 越小淡纹越显，噪点也更明显；等于 1 为线性。
+   * 建议：0.35～0.65。
+   */
+  signalGamma: 0.48,
+  directionSoftness: 8,
+}
+
+export type WatermarkExtractTuneOptions = Partial<typeof WATERMARK_EXTRACT_CONFIG>
+
+/** 解析侧颜色配置：背景 / 文字 / 叠加（仅 RGB 方向，α 不参与通道提取）。 */
+export type WatermarkExtractOptions = WatermarkExtractTuneOptions & {
+  /** 底衬背景色，对应生成 backgroundColor */
+  backgroundColor?: string
+  /** 文字颜色，对应生成 textColor */
+  textColor?: string
+  /** 叠加色：文字叠在底衬上的合成方向，可手调；未传则只用背景 + 文字两路 */
+  overlayColor?: string
+  /** 是否启用底衬通道解析，默认开启；仅 `false` 时关闭 */
+  useBackground?: boolean
+}
+
+export type WatermarkDataUrlOptions = Partial<typeof WATERMARK_CONFIG> & {
+  /** 窄屏时合并 {@link WATERMARK_MOBILE_CONFIG}，默认 true。 */
+  denseOnMobile?: boolean
+}
+
+/** 当前视口是否使用移动端水印密度。 */
+export function isMobileWatermarkViewport() {
+  if (typeof window === 'undefined') return false
+  return window.innerWidth <= WATERMARK_MOBILE_MAX_WIDTH
+}
+
+/**
+ * 挂载前解析水印配置：窄屏且 denseOnMobile 为 true 时合并 {@link WATERMARK_MOBILE_CONFIG}。
+ * 调用方显式传入的字段会覆盖移动端默认值。
+ */
+export function resolveWatermarkConfig(config: WatermarkDataUrlOptions = {}) {
+  const { denseOnMobile = true, ...rest } = config
+  if (!denseOnMobile || !isMobileWatermarkViewport()) {
+    return rest
+  }
+  return { ...WATERMARK_MOBILE_CONFIG, ...rest }
+}
 
 const MAX_SIDE = 1700
 const BACKGROUND_RADII = [9, 18, 32]
@@ -152,6 +246,273 @@ function percentile(values: Uint8Array, ratio: number) {
     if (seen >= target) return i
   }
   return 255
+}
+
+function parseRgbaColor(input: string) {
+  const match = input.match(/rgba?\(\s*([^)]+)\s*\)/i)
+  if (!match) {
+    return { r: 0, g: 0, b: 0, a: 1 }
+  }
+  const parts = match[1].split(',').map((part) => part.trim())
+  return {
+    r: clampByte(Number(parts[0])),
+    g: clampByte(Number(parts[1])),
+    b: clampByte(Number(parts[2])),
+    a: parts[3] !== undefined ? Math.max(0, Math.min(1, Number(parts[3]))) : 1,
+  }
+}
+
+/** 文字叠在底衬上的 RGBA，供解析默认「叠加颜色」参考。 */
+export function blendWatermarkColors(textColor: string, backgroundColor: string) {
+  const top = parseRgbaColor(textColor)
+  const bottom = parseRgbaColor(backgroundColor)
+  const alpha = top.a + bottom.a * (1 - top.a)
+  if (alpha <= 0) return 'rgba(0, 0, 0, 0)'
+
+  const r = (top.r * top.a + bottom.r * bottom.a * (1 - top.a)) / alpha
+  const g = (top.g * top.a + bottom.g * bottom.a * (1 - top.a)) / alpha
+  const b = (top.b * top.a + bottom.b * bottom.a * (1 - top.a)) / alpha
+  return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${alpha.toFixed(3)})`
+}
+
+function resolveTextColor(config: WatermarkDataUrlOptions) {
+  return config.textColor ?? config.color ?? WATERMARK_CONFIG.textColor
+}
+
+/** 文字底衬默认开启，仅显式 `useBackground: false` 时关闭。 */
+function resolveUseBackground(config: { useBackground?: boolean } = {}) {
+  return config.useBackground !== false
+}
+
+function resolveWatermarkDrawConfig(config: WatermarkDataUrlOptions = {}) {
+  const resolved = resolveWatermarkConfig(config)
+  const textColor = resolveTextColor(resolved)
+  const backgroundColor = resolved.backgroundColor ?? WATERMARK_CONFIG.backgroundColor
+  return {
+    fontSize: resolved.fontSize ?? WATERMARK_CONFIG.fontSize,
+    textColor,
+    backgroundColor,
+    rotate: resolved.rotate ?? WATERMARK_CONFIG.rotate,
+    gapX: resolved.gapX ?? WATERMARK_CONFIG.gapX,
+    gapY: resolved.gapY ?? WATERMARK_CONFIG.gapY,
+    useBackground: resolveUseBackground(resolved),
+    patchPaddingX: resolved.patchPaddingX ?? WATERMARK_CONFIG.patchPaddingX,
+    patchPaddingY: resolved.patchPaddingY ?? WATERMARK_CONFIG.patchPaddingY,
+    patchRadius: resolved.patchRadius ?? WATERMARK_CONFIG.patchRadius,
+  }
+}
+
+function defaultExtractOptions(
+  config: WatermarkDataUrlOptions = {}
+): WatermarkExtractOptions {
+  const textColor = resolveTextColor(config)
+  const backgroundColor = config.backgroundColor ?? WATERMARK_CONFIG.backgroundColor
+  return {
+    textColor,
+    backgroundColor,
+    overlayColor: blendWatermarkColors(textColor, backgroundColor),
+    useBackground: resolveUseBackground(config),
+    ...WATERMARK_EXTRACT_CONFIG,
+  }
+}
+
+function resolveExtractTune(embed: WatermarkExtractOptions = {}) {
+  return { ...WATERMARK_EXTRACT_CONFIG, ...embed }
+}
+
+type ConfigChannelRgb = { r: number; g: number; b: number }
+
+function embedColorLuminance(color: ConfigChannelRgb) {
+  return 0.299 * color.r + 0.587 * color.g + 0.114 * color.b
+}
+
+function directionAttenuation(delta: number, softness: number) {
+  if (delta <= 0) return 1
+  if (delta >= softness) return 0
+  return 1 - delta / softness
+}
+
+function configColorChannelResidual(
+  outR: number,
+  outG: number,
+  outB: number,
+  gray: number,
+  bgR: number,
+  bgG: number,
+  bgB: number,
+  bgGray: number,
+  embed: ConfigChannelRgb,
+  gain: number,
+  greenInkGain: number,
+  directionSoftness: number
+) {
+  if (embed.r > embed.g + 8 && embed.r > embed.b + 8) {
+    const rBump = Math.max(0, outR - bgR)
+    const greenCue = Math.max(0, outG - (outR + outB) / 2)
+    const score = Math.max(rBump * gain, greenCue * greenInkGain)
+    return score * directionAttenuation(Math.max(0, bgR - outR), directionSoftness)
+  }
+
+  if (embedColorLuminance(embed) > 140) {
+    const bright = Math.max(0, gray - bgGray)
+    return bright * gain * directionAttenuation(Math.max(0, bgGray - gray), directionSoftness)
+  }
+
+  const darkInk = Math.max(0, bgGray - gray)
+  const channelDark = Math.max(
+    Math.max(0, bgR - outR),
+    Math.max(0, bgG - outG),
+    Math.max(0, bgB - outB)
+  )
+  const score = Math.max(darkInk * gain, channelDark * gain * 0.5)
+  return score * directionAttenuation(Math.max(0, gray - bgGray), directionSoftness)
+}
+
+function channelIntegral(imageData: ImageData, channel: 0 | 1 | 2) {
+  const { width, height, data } = imageData
+  const plane = new Uint8Array(width * height)
+  for (let i = channel, j = 0; i < data.length; i += 4, j++) {
+    plane[j] = data[i]
+  }
+  return buildIntegral(plane, width, height)
+}
+
+function computeConfigChannelResidualField(
+  imageData: ImageData,
+  embed: WatermarkExtractOptions,
+  bgRadius: number,
+  tune: typeof WATERMARK_EXTRACT_CONFIG
+) {
+  const { width, height, data } = imageData
+  const text = parseRgbaColor(embed.textColor ?? WATERMARK_CONFIG.textColor)
+  const patch =
+    resolveUseBackground(embed) && embed.backgroundColor
+      ? parseRgbaColor(embed.backgroundColor)
+      : null
+  const overlay = embed.overlayColor ? parseRgbaColor(embed.overlayColor) : null
+
+  const gray = toGray(imageData)
+  const integralGray = buildIntegral(gray, width, height)
+  const integralR = channelIntegral(imageData, 0)
+  const integralG = channelIntegral(imageData, 1)
+  const integralB = channelIntegral(imageData, 2)
+  const diff = new Uint8Array(width * height)
+
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    const x = j % width
+    const y = Math.floor(j / width)
+    const bgR = boxMean(integralR, width, height, x, y, bgRadius)
+    const bgG = boxMean(integralG, width, height, x, y, bgRadius)
+    const bgB = boxMean(integralB, width, height, x, y, bgRadius)
+    const bgGray = boxMean(integralGray, width, height, x, y, bgRadius)
+
+    const outR = data[i]
+    const outG = data[i + 1]
+    const outB = data[i + 2]
+
+    let score = configColorChannelResidual(
+      outR,
+      outG,
+      outB,
+      gray[j],
+      bgR,
+      bgG,
+      bgB,
+      bgGray,
+      text,
+      tune.gain,
+      tune.greenInkGain,
+      tune.directionSoftness
+    )
+
+    if (patch) {
+      score = Math.max(
+        score,
+        configColorChannelResidual(
+          outR,
+          outG,
+          outB,
+          gray[j],
+          bgR,
+          bgG,
+          bgB,
+          bgGray,
+          patch,
+          tune.gain,
+          tune.greenInkGain,
+          tune.directionSoftness
+        )
+      )
+    }
+
+    if (overlay) {
+      score = Math.max(
+        score,
+        configColorChannelResidual(
+          outR,
+          outG,
+          outB,
+          gray[j],
+          bgR,
+          bgG,
+          bgB,
+          bgGray,
+          overlay,
+          tune.gain,
+          tune.greenInkGain,
+          tune.directionSoftness
+        )
+      )
+    }
+
+    diff[j] = clampByte(score)
+  }
+
+  return { width, height, diff }
+}
+
+type InkResidualTune = Pick<
+  typeof WATERMARK_EXTRACT_CONFIG,
+  'noisePercentile' | 'noiseCeilingPercentile' | 'noiseStretch' | 'signalGamma'
+>
+
+function inkResidualToImageData(
+  residual: Uint8Array,
+  width: number,
+  height: number,
+  tune: Partial<InkResidualTune> = WATERMARK_EXTRACT_CONFIG
+) {
+  const t = { ...WATERMARK_EXTRACT_CONFIG, ...tune }
+  const noiseFloor = percentile(residual, t.noisePercentile)
+  const noiseCeil = Math.max(
+    noiseFloor + 1,
+    percentile(residual, t.noiseCeilingPercentile)
+  )
+  const span = noiseCeil - noiseFloor
+  const out = new ImageData(width, height)
+
+  for (let i = 0, j = 0; j < residual.length; i += 4, j++) {
+    const norm = Math.min(1, Math.max(0, (residual[j] - noiseFloor) / span))
+    const ink = clampByte(Math.pow(norm, t.signalGamma) * 255 * t.noiseStretch)
+    const value = 255 - ink
+    out.data[i] = out.data[i + 1] = out.data[i + 2] = value
+    out.data[i + 3] = 255
+  }
+  return out
+}
+
+function configReverseWatermarkLayerFromImageData(
+  imageData: ImageData,
+  embed: WatermarkExtractOptions = {}
+) {
+  const tune = resolveExtractTune(embed)
+  const { width, height, diff } = computeConfigChannelResidualField(
+    imageData,
+    embed,
+    tune.bgRadius,
+    tune
+  )
+  return inkResidualToImageData(diff, width, height, tune)
 }
 
 /**
@@ -281,7 +642,8 @@ async function createImageBitmapFromSource(source: WatermarkImageSource) {
 
 function createModeContrastView(
   bitmap: ImageBitmap,
-  mode: WatermarkContrastMode
+  mode: WatermarkContrastMode,
+  extractOptions: WatermarkExtractOptions = defaultExtractOptions()
 ): WatermarkContrastView {
   const maxSide = Math.max(bitmap.width, bitmap.height)
   const baseScale = Math.min(1, MAX_SIDE / Math.max(1, maxSide))
@@ -293,6 +655,16 @@ function createModeContrastView(
   ctx.drawImage(bitmap, 0, 0, width, height)
 
   const imageData = ctx.getImageData(0, 0, width, height)
+
+  if (mode === 'reverse-layer') {
+    return {
+      label: '配置通道提取（背景 / 文字 / 叠加）',
+      dataUrl: imageDataToDataUrl(
+        configReverseWatermarkLayerFromImageData(imageData, extractOptions)
+      ),
+    }
+  }
+
   if (mode === 'dark-ink') {
     return {
       label: '暗纹增强（大范围）',
@@ -321,11 +693,13 @@ function createModeContrastView(
 
 /** Read an image source and produce all contrast-enhanced extraction views. */
 async function extractHighContrastWatermarkFromFile(
-  file: WatermarkImageSource
+  file: WatermarkImageSource,
+  extractOptions: WatermarkExtractOptions = defaultExtractOptions()
 ): Promise<WatermarkContrastResult> {
   const bitmap = await createImageBitmapFromSource(file)
   try {
     const views: WatermarkContrastView[] = [
+      createModeContrastView(bitmap, 'reverse-layer', extractOptions),
       createModeContrastView(bitmap, 'local-difference'),
       createModeContrastView(bitmap, 'dark-ink'),
       createModeContrastView(bitmap, 'bright-ink'),
@@ -345,14 +719,52 @@ async function extractHighContrastWatermarkFromFile(
 /** Read an image source and produce only the requested enhancement view. */
 async function extractWatermarkContrastViewFromFile(
   file: WatermarkImageSource,
-  mode: WatermarkContrastMode
+  mode: WatermarkContrastMode,
+  extractOptions: WatermarkExtractOptions = defaultExtractOptions()
 ): Promise<WatermarkContrastView> {
   const bitmap = await createImageBitmapFromSource(file)
   try {
-    return createModeContrastView(bitmap, mode)
+    return createModeContrastView(bitmap, mode, extractOptions)
   } finally {
     bitmap.close()
   }
+}
+
+function drawWatermarkTile(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  textW: number,
+  textH: number,
+  centerX: number,
+  centerY: number,
+  rotate: number,
+  font: string,
+  draw: ReturnType<typeof resolveWatermarkDrawConfig>
+) {
+  ctx.save()
+  ctx.font = font
+  ctx.textBaseline = 'middle'
+  ctx.translate(centerX, centerY)
+  ctx.rotate((rotate * Math.PI) / 180)
+
+  if (draw.useBackground && draw.backgroundColor) {
+    const patchW = textW + draw.patchPaddingX * 2
+    const patchH = textH + draw.patchPaddingY * 2
+    const x = -patchW / 2
+    const y = -patchH / 2
+    ctx.fillStyle = draw.backgroundColor
+    if (typeof ctx.roundRect === 'function') {
+      ctx.beginPath()
+      ctx.roundRect(x, y, patchW, patchH, draw.patchRadius)
+      ctx.fill()
+    } else {
+      ctx.fillRect(x, y, patchW, patchH)
+    }
+  }
+
+  ctx.fillStyle = draw.textColor
+  ctx.fillText(text, -textW / 2, 0)
+  ctx.restore()
 }
 
 /**
@@ -363,48 +775,35 @@ function createWatermarkDataURL(
   text: string,
   config: WatermarkDataUrlOptions = {}
 ) {
-  const {
-    fontSize = WATERMARK_CONFIG.fontSize,
-    color = WATERMARK_CONFIG.color,
-    rotate = WATERMARK_CONFIG.rotate,
-    gapX = WATERMARK_CONFIG.gapX,
-    gapY = WATERMARK_CONFIG.gapY,
-  } = config
+  const draw = resolveWatermarkDrawConfig(config)
 
   const canvas = document.createElement('canvas')
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('当前浏览器不支持 Canvas 2D')
 
-  const font = `${fontSize}px -apple-system, "Segoe UI", sans-serif`
+  const font = `${draw.fontSize}px -apple-system, "Segoe UI", sans-serif`
   ctx.font = font
   const metrics = ctx.measureText(text)
   const textW = metrics.width
-  const textH = fontSize * 1.2
+  const textH = draw.fontSize * 1.2
 
-  const canvasW = textW + gapX
-  const canvasH = textH + gapY
+  const canvasW = textW + draw.gapX
+  const canvasH = textH + draw.gapY
   canvas.width = canvasW * 2
   canvas.height = canvasH * 2
 
-  ctx.font = font
-  ctx.fillStyle = color
-  ctx.textBaseline = 'middle'
-
-  const cx1 = canvasW / 2
-  const cy1 = canvasH / 2
-  ctx.save()
-  ctx.translate(cx1, cy1)
-  ctx.rotate((rotate * Math.PI) / 180)
-  ctx.fillText(text, -textW / 2, 0)
-  ctx.restore()
-
-  const cx2 = canvasW / 2 + canvasW
-  const cy2 = canvasH / 2 + canvasH
-  ctx.save()
-  ctx.translate(cx2, cy2)
-  ctx.rotate((rotate * Math.PI) / 180)
-  ctx.fillText(text, -textW / 2, 0)
-  ctx.restore()
+  drawWatermarkTile(ctx, text, textW, textH, canvasW / 2, canvasH / 2, draw.rotate, font, draw)
+  drawWatermarkTile(
+    ctx,
+    text,
+    textW,
+    textH,
+    canvasW / 2 + canvasW,
+    canvasH / 2 + canvasH,
+    draw.rotate,
+    font,
+    draw
+  )
 
   return canvas.toDataURL('image/png')
 }
@@ -549,21 +948,28 @@ export class WatermarkService {
   }
 
   /** Return all enhancement views, useful for debugging or batch display. */
-  async extractContrastViews(file: WatermarkImageSource): Promise<WatermarkContrastResult> {
-    return extractHighContrastWatermarkFromFile(file)
+  async extractContrastViews(
+    file: WatermarkImageSource,
+    extractOptions?: WatermarkExtractOptions
+  ): Promise<WatermarkContrastResult> {
+    return extractHighContrastWatermarkFromFile(file, extractOptions)
   }
 
-  /** Extract the default local-difference view. */
-  async extractLocalDifferenceView(file: WatermarkImageSource): Promise<LocalDifferenceWatermarkResult> {
-    return extractWatermarkContrastViewFromFile(file, 'local-difference')
+  /** Extract the default config-channel view. */
+  async extractLocalDifferenceView(
+    file: WatermarkImageSource,
+    extractOptions?: WatermarkExtractOptions
+  ): Promise<LocalDifferenceWatermarkResult> {
+    return extractWatermarkContrastViewFromFile(file, 'reverse-layer', extractOptions)
   }
 
   /** Return the enhancement view matching the selected page mode. */
   async extractContrastViewByMode(
     file: WatermarkImageSource,
-    mode: WatermarkContrastMode
+    mode: WatermarkContrastMode,
+    extractOptions?: WatermarkExtractOptions
   ): Promise<LocalDifferenceWatermarkResult> {
-    return extractWatermarkContrastViewFromFile(file, mode)
+    return extractWatermarkContrastViewFromFile(file, mode, extractOptions)
   }
 }
 
@@ -573,4 +979,5 @@ if (typeof window !== 'undefined') {
 }
 export {
   watermarkService,
+  defaultExtractOptions,
 }
